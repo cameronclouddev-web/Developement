@@ -75,7 +75,7 @@ Parameters:
     MaxValue: 10
     Description: Number of Porter tasks.
 
-  AssetsBucketName:
+  AssetsBucket:
     Type: String
     AllowedPattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
     Description: S3 bucket holding layer configs and tile content.
@@ -84,14 +84,14 @@ Parameters:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
-    Description: true = this stack creates AssetsBucketName. false = bucket already exists.
+    Description: true = this stack creates AssetsBucket. false = bucket already exists.
 
   LayerConfigPrefix:
     Type: String
     Default: comingle/layer_configs/
     Description: Key prefix for layer configs. Must end with a slash.
 
-  OutputBucketName:
+  OutputBucket:
     Type: String
     Default: ""
     Description: Optional second bucket the task role may read/write. Leave blank to skip.
@@ -318,7 +318,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Ref AssetsBucketName
+      BucketName: !Ref AssetsBucket
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -335,7 +335,7 @@ Resources:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
       Tags:
-        - { Key: Name, Value: !Ref AssetsBucketName }
+        - { Key: Name, Value: !Ref AssetsBucket }
         - { Key: Environment, Value: !Ref EnvironmentName }
 
   # ---------------------------------------------------------------- security
@@ -637,9 +637,9 @@ Outputs:
 
   AssetsBucketName:
     Description: Assets bucket in use (created or referenced).
-    Value: !Ref AssetsBucketName
+    Value: !Ref AssetsBucket
     Export:
-      Name: !Sub "porter-${EnvironmentName}-AssetsBucketName"
+      Name: !Sub "porter-${EnvironmentName}-AssetsBucket"
 
   EcsClusterName:
     Description: ECS cluster name (for ecs execute-command).
