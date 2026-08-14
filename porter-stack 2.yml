@@ -14,7 +14,7 @@ Metadata:
       - Label: { default: "Porter container" }
         Parameters: [PorterImageUri, CorsOrigin, BlockCacheSize, TaskCpu, TaskMemory, DesiredCount]
       - Label: { default: "Storage" }
-        Parameters: [AssetsBucketName, CreateAssetsBucket, LayerConfigPrefix, OutputBucketName]
+        Parameters: [AssetsBucket, CreateAssetsBucket, LayerConfigPrefix, OutputBucket]
       - Label: { default: "Network access" }
         Parameters: [AllowedClientCidr1, AllowedClientCidr2, AllowedClientCidr3]
       - Label: { default: "Health check / logging" }
@@ -131,7 +131,7 @@ Parameters:
 
 Conditions:
   CreateBucket: !Equals [!Ref CreateAssetsBucket, "true"]
-  HasOutputBucket: !Not [!Equals [!Ref OutputBucketName, ""]]
+  HasOutputBucket: !Not [!Equals [!Ref OutputBucket, ""]]
   HasCidr2: !Not [!Equals [!Ref AllowedClientCidr2, ""]]
   HasCidr3: !Not [!Equals [!Ref AllowedClientCidr3, ""]]
   MultiNat: !Equals [!Ref HighAvailabilityNat, "true"]
@@ -438,11 +438,11 @@ Resources:
                 Action:
                   - s3:ListBucket
                   - s3:GetBucketLocation
-                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucketName}"
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucket}"
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucketName}/*"
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucket}/*"
         - !If
           - HasOutputBucket
           - PolicyName: porter-output-bucket
@@ -561,7 +561,7 @@ Resources:
             - { Name: BLOCK_CACHE_SIZE, Value: !Ref BlockCacheSize }
             - { Name: BASE_URL, Value: !Sub "http://${PorterLoadBalancer.DNSName}" }
             - Name: LAYER_CONFIG_URI
-              Value: !Sub "s3://${AssetsBucketName}/${LayerConfigPrefix}"
+              Value: !Sub "s3://${AssetsBucket}/${LayerConfigPrefix}"
             - { Name: AWS_REGION, Value: !Ref AWS::Region }
           Ulimits:
             - { Name: nofile, SoftLimit: 65536, HardLimit: 65536 }
@@ -625,7 +625,7 @@ Outputs:
 
   LayerConfigUri:
     Description: S3 URI Porter reads layer configs from.
-    Value: !Sub "s3://${AssetsBucketName}/${LayerConfigPrefix}"
+    Value: !Sub "s3://${AssetsBucket}/${LayerConfigPrefix}"
     Export:
       Name: !Sub "porter-${EnvironmentName}-LayerConfigUri"
 
@@ -635,7 +635,7 @@ Outputs:
     Export:
       Name: !Sub "porter-${EnvironmentName}-TaskRoleArn"
 
-  AssetsBucketName:
+  AssetsBucket:
     Description: Assets bucket in use (created or referenced).
     Value: !Ref AssetsBucket
     Export:
