@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Porter stack 2 of 3 - PLATFORM. Security groups, IAM roles, CloudWatch log group,
+  optional assets bucket, and the CIDR-allowlisted ALB with its target group and
+  listener. Imports the VPC and public subnets from the network stack.
+  Deploy after 01-network, before 03-service. Requires CAPABILITY_NAMED_IAM.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Environment" }
+        Parameters: [EnvironmentName]
+      - Label: { default: "Storage" }
+        Parameters: [AssetsBucket, CreateAssetsBucket, OutputBucket]
+      - Label: { default: "Network access" }
+        Parameters: [AllowedClientCidr1, AllowedClientCidr2, AllowedClientCidr3]
+      - Label: { default: "Health check / logging" }
+        Parameters: [HealthCheckPath, HealthCheckMatcher, LogRetentionInDays]
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [test, prod]
+    Description: Must match the value used in the network stack. Drives export lookups.
+
+  AssetsBucket:
+    Type: String
+    Default: vantor-porter-assets-test
+    MinLength: 3
+    MaxLength: 63
+    Description: >-
+      S3 bucket holding layer configs and tile content. Lowercase letters, digits,
+      dots and hyphens only. S3 rejects an invalid name at create time.
+
+  CreateAssetsBucket:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true = this stack creates AssetsBucket. false = bucket already exists.
+
+  OutputBucket:
+    Type: String
+    Default: ""
+    Description: Optional second bucket the task role may read/write. Leave blank to skip.
+
+  AllowedClientCidr1:
+    Type: String
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: Required client CIDR allowed to reach the ALB on port 80. Include the prefix, e.g. 203.0.113.45/32
+
+  AllowedClientCidr2:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: Optional second client CIDR.
+
+  AllowedClientCidr3:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: Optional third client CIDR.
+
+  HealthCheckPath:
+    Type: String
+    Default: /layers
+    Description: ALB target group health check path.
+
+  HealthCheckMatcher:
+    Type: String
+    Default: 200-399
+    Description: HTTP codes treated as healthy.
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: CloudWatch Logs retention for the Porter log group.
+
+Conditions:
+  CreateBucket: !Equals [!Ref CreateAssetsBucket, "true"]
+  HasOutputBucket: !Not [!Equals [!Ref OutputBucket, ""]]
+  HasCidr2: !Not [!Equals [!Ref AllowedClientCidr2, ""]]
+  HasCidr3: !Not [!Equals [!Ref AllowedClientCidr3, ""]]
+
+Resources:
+
+  # ------------------------------------------------------------------ storage
+
+  PorterAssetsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref AssetsBucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - { Key: Name, Value: !Ref AssetsBucket }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  # ---------------------------------------------------------------- security
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Porter ALB ingress (${EnvironmentName}) - CIDR allowlist only"
+      VpcId: !ImportValue
+        Fn::Sub: "porter-${EnvironmentName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedClientCidr1
+          Description: Allowed client CIDR 1
+        - !If
+          - HasCidr2
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: !Ref AllowedClientCidr2
+            Description: Allowed client CIDR 2
+          - !Ref AWS::NoValue
+        - !If
+          - HasCidr3
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: !Ref AllowedClientCidr3
+            Description: Allowed client CIDR 3
+          - !Ref AWS::NoValue
+      Tags:
+        - { Key: Name, Value: !Sub "porter-${EnvironmentName}-alb-sg" }
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Porter Fargate tasks (${EnvironmentName}) - ALB only"
+      VpcId: !ImportValue
+        Fn::Sub: "porter-${EnvironmentName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Porter HTTP from ALB
+      Tags:
+        - { Key: Name, Value: !Sub "porter-${EnvironmentName}-task-sg" }
+
+  # -------------------------------------------------------------------- logs
+
+  PorterLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/ecs/porter/${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+  # --------------------------------------------------------------------- iam
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "porter-${EnvironmentName}-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: porter-log-writes
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/porter/${EnvironmentName}:*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "porter-${EnvironmentName}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: porter-assets-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucket}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AssetsBucket}/*"
+        - !If
+          - HasOutputBucket
+          - PolicyName: porter-output-bucket
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}"
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:AbortMultipartUpload
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}/*"
+          - !Ref AWS::NoValue
+        - PolicyName: porter-ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # --------------------------------------------------------------------- alb
+
+  PorterLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "porter-${EnvironmentName}-alb"
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      Subnets:
+        - !ImportValue
+          Fn::Sub: "porter-${EnvironmentName}-PublicSubnet1Id"
+        - !ImportValue
+          Fn::Sub: "porter-${EnvironmentName}-PublicSubnet2Id"
+      LoadBalancerAttributes:
+        - { Key: idle_timeout.timeout_seconds, Value: "120" }
+        - { Key: routing.http.drop_invalid_header_fields.enabled, Value: "true" }
+      Tags:
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  PorterTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "porter-${EnvironmentName}-tg"
+      VpcId: !ImportValue
+        Fn::Sub: "porter-${EnvironmentName}-VpcId"
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Matcher:
+        HttpCode: !Ref HealthCheckMatcher
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  PorterHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PorterLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PorterTargetGroup
+
+Outputs:
+
+  TaskSecurityGroupId:
+    Description: Security group for the Fargate tasks.
+    Value: !Ref TaskSecurityGroup
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-TaskSecurityGroupId"
+
+  TargetGroupArn:
+    Description: Target group the ECS service registers into.
+    Value: !Ref PorterTargetGroup
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-TargetGroupArn"
+
+  ExecutionRoleArn:
+    Description: ECS task execution role.
+    Value: !GetAtt ExecutionRole.Arn
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-ExecutionRoleArn"
+
+  TaskRoleArn:
+    Description: Porter task role.
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-TaskRoleArn"
+
+  LogGroupName:
+    Description: CloudWatch log group for Porter.
+    Value: !Ref PorterLogGroup
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-LogGroupName"
+
+  AlbDnsName:
+    Description: ALB DNS name. The service stack uses this for BASE_URL.
+    Value: !GetAtt PorterLoadBalancer.DNSName
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-AlbDnsName"
+
+  ListenerArn:
+    Description: HTTP listener ARN.
+    Value: !Ref PorterHttpListener
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-ListenerArn"
+
+  PorterUrl:
+    Description: Porter base URL (HTTP only - no TLS on this listener).
+    Value: !Sub "http://${PorterLoadBalancer.DNSName}"
+
+  AssetsBucketInUse:
+    Description: Assets bucket in use (created or referenced).
+    Value: !Ref AssetsBucket
+    Export:
+      Name: !Sub "porter-${EnvironmentName}-AssetsBucket"
