@@ -453,13 +453,13 @@ Resources:
                   Action:
                     - s3:ListBucket
                     - s3:GetBucketLocation
-                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucketName}"
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}"
                 - Effect: Allow
                   Action:
                     - s3:GetObject
                     - s3:PutObject
                     - s3:AbortMultipartUpload
-                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucketName}/*"
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}/*"
           - !Ref AWS::NoValue
         - PolicyName: porter-ecs-exec
           PolicyDocument:
