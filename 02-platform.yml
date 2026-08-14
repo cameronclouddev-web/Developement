@@ -26,8 +26,12 @@ Parameters:
 
   AssetsBucket:
     Type: String
-    AllowedPattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
-    Description: S3 bucket holding layer configs and tile content.
+    Default: vantor-porter-assets-test
+    MinLength: 3
+    MaxLength: 63
+    Description: >-
+      S3 bucket holding layer configs and tile content. Lowercase letters, digits,
+      dots and hyphens only. S3 rejects an invalid name at create time.
 
   CreateAssetsBucket:
     Type: String
