@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Porter stack 3 of 3 - SERVICE. ECS cluster, Fargate task definition, and the
+  Porter service registered into the ALB target group. Imports the private subnets
+  and NAT-ready marker from 01-network, and the roles, log group, security group,
+  target group, and ALB DNS name from 02-platform. Deploy last. No IAM capabilities
+  required. Safe to delete and recreate on its own without touching the other stacks.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Environment" }
+        Parameters: [EnvironmentName]
+      - Label: { default: "Porter container" }
+        Parameters: [PorterImageUri, CorsOrigin, BlockCacheSize, LayerConfigPrefix]
+      - Label: { default: "Task sizing" }
+        Parameters: [TaskCpu, TaskMemory, DesiredCount]
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [test, prod]
+    Description: Must match the value used in the network and platform stacks. Drives export lookups.
+
+  PorterImageUri:
+    Type: String
+    Default: ghcr.io/mappend-io/porter:sha-2bcd898
+    Description: >-
+      Porter container image URI. If this is a private GHCR path with no credentials
+      configured, the task will fail with CannotPullContainerError - mirror it to ECR first.
+
+  CorsOrigin:
+    Type: String
+    Default: "*"
+    Description: Value for CORS_ORIGIN.
+
+  BlockCacheSize:
+    Type: String
+    Default: 8GiB
+    Description: Value for BLOCK_CACHE_SIZE. Must fit inside TaskMemory.
+
+  LayerConfigPrefix:
+    Type: String
+    Default: comingle/layer_configs/
+    Description: Key prefix for layer configs in the assets bucket. Must end with a slash.
+
+  TaskCpu:
+    Type: String
+    Default: "4096"
+    AllowedValues: ["1024", "2048", "4096", "8192", "16384"]
+    Description: Fargate task CPU units. Dev Comingle uses 4096.
+
+  TaskMemory:
+    Type: String
+    Default: "16384"
+    Description: Fargate task memory in MiB. Dev Comingle uses 16384.
+
+  DesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 10
+    Description: >-
+      Number of Porter tasks. Start at 0, sync layer configs to the assets bucket,
+      then update this to 1 so the /layers health check has something to serve.
+
+Resources:
+
+  # --------------------------------------------------------------------- ecs
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "porter-${EnvironmentName}"
+      ClusterSettings:
+        - { Name: containerInsights, Value: enabled }
+      Tags:
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  PorterTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "porter-${EnvironmentName}"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: "porter-${EnvironmentName}-ExecutionRoleArn"
+      TaskRoleArn: !ImportValue
+        Fn::Sub: "porter-${EnvironmentName}-TaskRoleArn"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: porter
+          Image: !Ref PorterImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Environment:
+            - { Name: LISTEN_ADDR, Value: "0.0.0.0:80" }
+            - { Name: METRICS_LISTEN_ADDR, Value: "127.0.0.1:9000" }
+            - { Name: PRETTY_LOG, Value: "false" }
+            - { Name: CORS_ORIGIN, Value: !Ref CorsOrigin }
+            - { Name: BLOCK_CACHE_SIZE, Value: !Ref BlockCacheSize }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - Name: BASE_URL
+              Value: !Sub
+                - "http://${AlbDns}"
+                - AlbDns: !ImportValue
+                    Fn::Sub: "porter-${EnvironmentName}-AlbDnsName"
+            - Name: LAYER_CONFIG_URI
+              Value: !Sub
+                - "s3://${Bucket}/${LayerConfigPrefix}"
+                - Bucket: !ImportValue
+                    Fn::Sub: "porter-${EnvironmentName}-AssetsBucket"
+          Ulimits:
+            - { Name: nofile, SoftLimit: 65536, HardLimit: 65536 }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !ImportValue
+                Fn::Sub: "porter-${EnvironmentName}-LogGroupName"
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: porter
+
+  PorterService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "porter-${EnvironmentName}"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref PorterTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      PropagateTags: SERVICE
+      HealthCheckGracePeriodSeconds: 120
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: "porter-${EnvironmentName}-PrivateSubnet1Id"
+            - !ImportValue
+              Fn::Sub: "porter-${EnvironmentName}-PrivateSubnet2Id"
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: "porter-${EnvironmentName}-TaskSecurityGroupId"
+      LoadBalancers:
+        - ContainerName: porter
+          ContainerPort: 80
+          TargetGroupArn: !ImportValue
+            Fn::Sub: "porter-${EnvironmentName}-TargetGroupArn"
+      Tags:
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - Key: NatEgress
+          Value: !ImportValue
+            Fn::Sub: "porter-${EnvironmentName}-NatEgressReady"
+
+Outputs:
+
+  EcsClusterName:
+    Description: ECS cluster name (for aws ecs execute-command).
+    Value: !Ref EcsCluster
+
+  EcsServiceName:
+    Description: ECS service name (for forced redeploys).
+    Value: !GetAtt PorterService.Name
+
+  TaskDefinitionArn:
+    Description: Current Porter task definition.
+    Value: !Ref PorterTaskDefinition
+
+  PorterUrl:
+    Description: Porter base URL. HTTP only - no TLS on this listener.
+    Value: !Sub
+      - "http://${AlbDns}"
+      - AlbDns: !ImportValue
+          Fn::Sub: "porter-${EnvironmentName}-AlbDnsName"
